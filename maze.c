@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
+#include <locale.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,8 @@
 #define ARG_HEIGHT_SHORT "-h"
 #define ARG_WIDTH_LONG "--width"
 #define ARG_WIDTH_SHORT "-w"
+
+#define BLOCK u8"\u2588"
 
 typedef struct
 {
@@ -61,14 +64,15 @@ size_t stack_size(stack* s)
     return s->p;
 }
 
-int main(int argc, char* argv[])
+typedef struct
 {
-    srand(time(NULL) + clock());
+    unsigned int width;
+    unsigned int height;
+} arguments;
 
-    unsigned int width = 10;
-    unsigned int height = 10;
-
-    for (char** arg = &argv[1]; *arg != NULL;)
+int parse_args(char** argv, arguments* args)
+{
+    for (char** arg = argv; *arg != NULL;)
     {
         if (strncmp(*arg, ARG_HEIGHT_LONG, sizeof(ARG_HEIGHT_LONG)) == 0 ||
             strncmp(*arg, ARG_HEIGHT_SHORT, sizeof(ARG_HEIGHT_SHORT)) == 0)
@@ -81,7 +85,7 @@ int main(int argc, char* argv[])
             long value = strtol(*arg, /*str_end*/ NULL, /*base*/ 10);
             if (errno || value < 1 || value > UINT_MAX)
                 goto usage;
-            height = (unsigned int)value;
+            args->height = (unsigned int)value;
             arg++;
         }
         else if (strncmp(*arg, ARG_WIDTH_LONG, sizeof(ARG_WIDTH_LONG)) == 0 ||
@@ -95,7 +99,7 @@ int main(int argc, char* argv[])
             long value = strtol(*arg, /*str_end*/ NULL, /*base*/ 10);
             if (errno || value < 1 || value > UINT_MAX)
                 goto usage;
-            width = (unsigned int)value;
+            args->width = (unsigned int)value;
             arg++;
         }
         else
@@ -103,34 +107,32 @@ int main(int argc, char* argv[])
             goto usage;
         }
     }
+    return 0;
 
+usage:
+    printf("usage: maze [-h|--height 1..UINT_MAX] [-w|--width 1..UINT_MAX]\n");
+    return -1;
+}
+
+enum errors
+{
+    ERROR_UNKNOWN = -1,
+    ERROR_OUT_OF_MEMORY = -2,
+    ERROR_MAZE_TOO_LARGE = -3,
+};
+
+int depth_first_maze(arguments args, uint8_t* edges)
+{
     // The maze graph is always a regular lattice, so hold it directly in a (2D)
     // array (edges) which fully expresses the structure of the graph by
     // tracking the "south" and "east" edges for each node. Also tracks whether
     // a node has been visited.
 
-    uint8_t *edges = NULL;
     stack track;
-
-    if (SIZE_MAX / height < width)
-    {
-        puts("error: maze area too big");
-        goto error;
-    }
-
-    size_t area = height * width;
-
-    if ((edges = calloc((size_t)(area), sizeof(uint8_t))) == NULL)
-    {
-        puts("error: failed to allocate memory for maze");
-        goto error;
-    }
+    size_t area = args.height * args.width;
 
     if (stack_init(&track, area) == -1)
-    {
-        puts("error: failed to initialize stack");
-        goto error;
-    }
+        return ERROR_OUT_OF_MEMORY;
 
     size_t cell = 0;
 
@@ -143,13 +145,13 @@ int main(int argc, char* argv[])
         // find the set of unvisited neighbors
         size_t n = 0;
         char neighbors[MAX_NEIGHBORS] = {0};
-        if ((cell - width < cell) && !(edges[cell - width] & VISITED))
+        if ((cell - args.width < cell) && !(edges[cell - args.width] & VISITED))
             neighbors[n++] = 'n';
-        if ((cell + 1 > cell) && ((cell + 1) % width > (cell % width)) && !(edges[cell + 1] & VISITED))
+        if ((cell + 1 > cell) && ((cell + 1) % args.width > (cell % args.width)) && !(edges[cell + 1] & VISITED))
             neighbors[n++] = 'e';
-        if ((cell + width < area) && (cell + width > cell) && !(edges[cell + width] & VISITED))
+        if ((cell + args.width < area) && (cell + args.width > cell) && !(edges[cell + args.width] & VISITED))
             neighbors[n++] = 's';
-        if ((((cell - 1) % width) < (cell % width)) && (cell - 1 < cell) && !(edges[cell - 1] & VISITED))
+        if ((((cell - 1) % args.width) < (cell % args.width)) && (cell - 1 < cell) && !(edges[cell - 1] & VISITED))
             neighbors[n++] = 'w';
 
         // If there are unvisited neighbors, choose one at random and update the
@@ -161,7 +163,7 @@ int main(int argc, char* argv[])
             switch (neighbors[rand() % n])
             {
             case 'n':
-                next = cell - width;
+                next = cell - args.width;
                 edges[next] |= SOUTH;
                 break;
             case 'e':
@@ -169,7 +171,7 @@ int main(int argc, char* argv[])
                 edges[cell] |= EAST;
                 break;
             case 's':
-                next = cell + width;
+                next = cell + args.width;
                 edges[cell] |= SOUTH;
                 break;
             case 'w':
@@ -190,33 +192,63 @@ int main(int argc, char* argv[])
         }
     } while (stack_size(&track) > 0);
 
+    stack_destroy(&track);
+    return 0;
+}
+
+int main(int argc, char* argv[])
+{
+    srand(time(NULL) + clock());
+
+    if (setlocale(LC_ALL, "en_US.UTF-8") == NULL)
+    {
+        puts("error: failed to set locale");
+        return EXIT_FAILURE;
+    };
+
+    arguments args = {10, 10};
+    if (parse_args(&argv[1], &args) < 0)
+        return EXIT_FAILURE;
+
+    uint8_t *edges = NULL;
+
+    if (SIZE_MAX / args.height < args.width)
+    {
+        puts("error: maze area too big");
+        return EXIT_FAILURE;
+    }
+
+    size_t area = args.height * args.width;
+
+    if ((edges = calloc((size_t)(area), sizeof(uint8_t))) == NULL)
+    {
+        puts("error: out of memory");
+        return EXIT_FAILURE;
+    }
+
+    if (depth_first_maze(args, edges) < 0)
+    {
+        puts("error: out of memory");
+        return EXIT_FAILURE;
+    }
+
     // Render to screen.
 
-    for (unsigned long y = 0; y < height * 2; y++)
+    for (unsigned long y = 0; y < args.height * 2; y++)
     {
-        for (unsigned long x = 0; x < width * 4; x++)
+        for (unsigned long x = 0; x < args.width * 4; x++)
         {
-            size_t cell = (y / 2) * width + (x / 4);
-            if (x % 4 < 2 && y % 2 == 0) printf("#");
+            size_t cell = (y / 2) * args.width + (x / 4);
+            if (x % 4 < 2 && y % 2 == 0) printf(BLOCK);
             else if (x % 4 > 1 && y % 2 == 1) printf(" ");
-            else if (x % 4 < 2 && y % 2 == 1) printf(edges[cell] & SOUTH ? "#" : " ");
-            else if (x % 4 > 1 && y % 2 == 0) printf(edges[cell] & EAST ? "#" : " ");
+            else if (x % 4 < 2 && y % 2 == 1) printf(edges[cell] & SOUTH ? BLOCK : " ");
+            else if (x % 4 > 1 && y % 2 == 0) printf(edges[cell] & EAST ? BLOCK : " ");
             else printf(" ");
         }
         printf("\n");
     }
 
     free(edges);
-    stack_destroy(&track);
-    return 0;
-
-error:
-    free(edges);
-    stack_destroy(&track);
-    return 1;
-
-usage:
-    printf("usage: maze [-h|--height 1..UINT_MAX] [-w|--width 1..UINT_MAX]\n");
-    return 1;
+    return EXIT_SUCCESS;
 }
 
